@@ -1,7 +1,9 @@
 import os
 
 def write_file(path, content):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content.lstrip("\n"))
     print(f"Created: {path}")
@@ -20,6 +22,7 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven { url = uri("https://jitpack.io") }
     }
 }
 rootProject.name = "ClipPulse"
@@ -117,7 +120,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
-    // Media3 ExoPlayer for Clip Preview
+    // Media3 ExoPlayer
     implementation("androidx.media3:media3-exoplayer:1.4.1")
     implementation("androidx.media3:media3-ui:1.4.1")
 
@@ -233,10 +236,12 @@ class ClipPulseApp : Application() {
 }
 ''')
 
-# 8. Data Models
+# 8. Data Models & Settings Storage
 write_file("app/src/main/java/com/clippulse/app/model/Models.kt", r'''
 package com.clippulse.app.model
 
+import android.content.Context
+import java.util.Locale
 import java.util.UUID
 
 enum class SignalType(val label: String) {
@@ -313,8 +318,48 @@ fun formatTimestamp(totalSeconds: Double): String {
     val h = safe / 3600
     val m = (safe % 3600) / 60
     val s = safe % 60
-    return if (h > 0) String.format("%02d:%02d:%02d", h, m, s)
-    else String.format("%02d:%02d", m, s)
+    return if (h > 0) String.format(Locale.US, "%02d:%02d:%02d", h, m, s)
+    else String.format(Locale.US, "%02d:%02d", m, s)
+}
+
+object ConfigPrefs {
+    private const val PREF_NAME = "clippulse_ai_prefs"
+
+    fun load(context: Context): AiConfig {
+        val p = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        val backupsRaw = p.getString("backupKeys", "").orEmpty()
+        val backups = if (backupsRaw.isBlank()) emptyList() else backupsRaw.split("||").filter { it.isNotBlank() }
+        val modelsRaw = p.getString("availableModels", "").orEmpty()
+        val models = if (modelsRaw.isBlank()) emptyList() else modelsRaw.split("||").filter { it.isNotBlank() }
+        return AiConfig(
+            baseUrl = p.getString("baseUrl", "https://api.deepseek.com/v1") ?: "https://api.deepseek.com/v1",
+            apiKey = p.getString("apiKey", "").orEmpty(),
+            backupKeys = backups,
+            selectedModel = p.getString("selectedModel", "deepseek-chat") ?: "deepseek-chat",
+            availableModels = models,
+            isConnected = p.getBoolean("isConnected", false),
+            latencyMs = p.getLong("latencyMs", 0L),
+            statusMessage = p.getString("statusMessage", "Not connected") ?: "Not connected",
+            peakOnlyTokenSaver = p.getBoolean("peakOnlyTokenSaver", true),
+            offlineMode = p.getBoolean("offlineMode", false)
+        )
+    }
+
+    fun save(context: Context, config: AiConfig) {
+        val p = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        p.edit()
+            .putString("baseUrl", config.baseUrl)
+            .putString("apiKey", config.apiKey)
+            .putString("backupKeys", config.backupKeys.joinToString("||"))
+            .putString("selectedModel", config.selectedModel)
+            .putString("availableModels", config.availableModels.joinToString("||"))
+            .putBoolean("isConnected", config.isConnected)
+            .putLong("latencyMs", config.latencyMs)
+            .putString("statusMessage", config.statusMessage)
+            .putBoolean("peakOnlyTokenSaver", config.peakOnlyTokenSaver)
+            .putBoolean("offlineMode", config.offlineMode)
+            .apply()
+    }
 }
 ''')
 
@@ -624,6 +669,7 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.FileInputStream
 import java.io.InputStreamReader
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -660,7 +706,7 @@ class ClipEngine(private val context: Context) {
                     ?: return@withContext Result.failure(Exception("Could not read selected video file."))
                 val duration = probeDurationSeconds(localFile)
                 onStep("Scanning audio waveform peaks...")
-                val audioClips = detectLocalAudioPeaks(localFile, duration)
+                val audioClips = detectLocalAudioPeaks(duration)
                 return@withContext Result.success(
                     VideoAnalysisResult(
                         sourceUrl = localFile.absolutePath,
@@ -711,13 +757,11 @@ class ClipEngine(private val context: Context) {
             allRaw.addAll(heatmapClips)
             allRaw.addAll(chatHypeClips)
 
-            // Fallback audio peak scan if no heatmap & no chat (e.g. Facebook video)
-            if (allRaw.isEmpty() && previewUrl != null) {
-                onStep("2/3 Scanning audio peaks...")
-                allRaw.addAll(detectRemoteAudioPeaks(previewUrl, duration))
+            if (allRaw.isEmpty()) {
+                onStep("2/3 Scanning stream highlight windows...")
+                allRaw.addAll(detectRemoteAudioPeaks(duration))
             }
 
-            // Step 3: AI Alignment & Viral Moment Detection (if connected and not offline)
             val useAi = !aiConfig.offlineMode && aiConfig.isConnected && aiConfig.apiKey.isNotBlank()
             val allKeys = listOf(aiConfig.apiKey) + aiConfig.backupKeys
 
@@ -746,7 +790,8 @@ class ClipEngine(private val context: Context) {
                 )
             } else emptyList()
 
-            val combined = (alignedSuperChats + heatmapClips + chatHypeClips + aiClips)
+            val combined = (alignedSuperChats + heatmapClips + chatHypeClips + aiClips +
+                if (allRaw.any { it.primarySignal == SignalType.AUDIO_SPIKE }) allRaw else emptyList())
                 .map { applyPadding(it, exportSettings, duration) }
 
             val merged = mergeConsensusSignals(combined)
@@ -927,7 +972,7 @@ class ClipEngine(private val context: Context) {
         return filtered.joinToString("\n") { "[${it.first.toInt()}s] ${it.second}" }.take(24000)
     }
 
-    private fun detectLocalAudioPeaks(file: File, durationSec: Double): List<ClipCandidate> {
+    private fun detectLocalAudioPeaks(durationSec: Double): List<ClipCandidate> {
         val step = (durationSec / 5.0).coerceAtLeast(25.0)
         val out = mutableListOf<ClipCandidate>()
         var t = 5.0
@@ -949,7 +994,7 @@ class ClipEngine(private val context: Context) {
         return out
     }
 
-    private fun detectRemoteAudioPeaks(streamUrl: String, durationSec: Double): List<ClipCandidate> {
+    private fun detectRemoteAudioPeaks(durationSec: Double): List<ClipCandidate> {
         val step = (durationSec / 4.0).coerceAtLeast(30.0)
         val out = mutableListOf<ClipCandidate>()
         var t = 10.0
@@ -1061,7 +1106,7 @@ class ClipEngine(private val context: Context) {
         var exportedCount = 0
 
         selected.forEachIndexed { index, clip ->
-            val num = String.format("%02d", index + 1)
+            val num = String.format(Locale.US, "%02d", index + 1)
             val safeName = clip.title.replace(Regex("[^a-zA-Z0-9_$]"), "_").take(32)
             val fileName = "${num}_${safeName}.mp4"
             val tempOut = File(exportDir, fileName)
@@ -1171,6 +1216,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -1217,7 +1263,11 @@ class ClipForegroundService : Service() {
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setOngoing(true)
             .build()
-        startForeground(NOTIF_ID, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(NOTIF_ID, notification)
+        }
         return START_NOT_STICKY
     }
 
@@ -1267,7 +1317,7 @@ fun ClipPulseTheme(content: @Composable () -> Unit) {
 
 # 13. Jetpack Compose UI Screen
 write_file("app/src/main/java/com/clippulse/app/ui/ClipPulseScreen.kt", r'''
-@file:OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@file:OptIn(ExperimentalMaterial3Api::class)
 
 package com.clippulse.app.ui
 
@@ -1280,7 +1330,6 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -1333,7 +1382,7 @@ fun ClipPulseScreen(incomingSharedUrl: String?) {
     var selectedMode by remember { mutableStateOf(DetectionMode.ALL) }
     var customKeyword by remember { mutableStateOf("") }
 
-    var aiConfig by remember { mutableStateOf(AiConfig()) }
+    var aiConfig by remember { mutableStateOf(ConfigPrefs.load(context)) }
     var exportSettings by remember { mutableStateOf(ExportSettings()) }
 
     var isAnalyzing by remember { mutableStateOf(false) }
@@ -1344,6 +1393,11 @@ fun ClipPulseScreen(incomingSharedUrl: String?) {
 
     var showAiSheet by remember { mutableStateOf(false) }
     var showExportSettings by remember { mutableStateOf(false) }
+
+    fun updateAndSaveAiConfig(newCfg: AiConfig) {
+        aiConfig = newCfg
+        ConfigPrefs.save(context, newCfg)
+    }
 
     LaunchedEffect(incomingSharedUrl) {
         if (!incomingSharedUrl.isNullOrBlank()) {
@@ -1642,11 +1696,40 @@ fun ClipPulseScreen(incomingSharedUrl: String?) {
                                 overflow = TextOverflow.Ellipsis,
                                 color = Color.White
                             )
-                            Text(
-                                "Smart Timeline • ${formatTimestamp(currentData.durationSec)} • ${currentData.clips.size} clips found",
-                                fontSize = 12.sp,
-                                color = Color.Gray
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "Timeline • ${formatTimestamp(currentData.durationSec)} • ${currentData.clips.size} clips",
+                                    fontSize = 12.sp,
+                                    color = Color.Gray
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Text(
+                                        "Select All",
+                                        fontSize = 12.sp,
+                                        color = IndigoAccent,
+                                        fontWeight = FontWeight.SemiBold,
+                                        modifier = Modifier.clickable {
+                                            analysisResult = currentData.copy(
+                                                clips = currentData.clips.map { it.copy(selected = true) }
+                                            )
+                                        }
+                                    )
+                                    Text(
+                                        "Clear",
+                                        fontSize = 12.sp,
+                                        color = Color.Gray,
+                                        modifier = Modifier.clickable {
+                                            analysisResult = currentData.copy(
+                                                clips = currentData.clips.map { it.copy(selected = false) }
+                                            )
+                                        }
+                                    )
+                                }
+                            }
 
                             // Visual Heatmap & Marker Canvas
                             Canvas(
@@ -1716,7 +1799,8 @@ fun ClipPulseScreen(incomingSharedUrl: String?) {
                     }
                 }
 
-                val visibleClips = currentData.clips.filter { activeFilter == null || activeFilter!! in it.matchedSignals }
+                val currentFilter = activeFilter
+                val visibleClips = currentData.clips.filter { currentFilter == null || currentFilter in it.matchedSignals }
                 items(visibleClips, key = { it.id }) { clip ->
                     ClipItemCard(
                         clip = clip,
@@ -1759,7 +1843,7 @@ fun ClipPulseScreen(incomingSharedUrl: String?) {
                 config = aiConfig,
                 aiClient = aiClient,
                 engine = engine,
-                onUpdateConfig = { aiConfig = it }
+                onUpdateConfig = { updateAndSaveAiConfig(it) }
             )
         }
     }
