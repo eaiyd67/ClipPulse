@@ -153,6 +153,7 @@ write_file("app/src/main/AndroidManifest.xml", r'''
         android:name=".ClipPulseApp"
         android:allowBackup="true"
         android:extractNativeLibs="true"
+        android:icon="@drawable/ic_launcher"
         android:requestLegacyExternalStorage="true"
         android:label="ClipPulse"
         android:supportsRtl="true"
@@ -167,7 +168,6 @@ write_file("app/src/main/AndroidManifest.xml", r'''
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- 1-Tap Share-to-Clip from YouTube / Facebook -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -184,7 +184,22 @@ write_file("app/src/main/AndroidManifest.xml", r'''
 </manifest>
 ''')
 
-# 6. Resources
+# 6. Resources & App Icon
+write_file("app/src/main/res/drawable/ic_launcher.xml", r'''
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#6366F1"
+        android:pathData="M0,0h108v108h-108z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M42,34L74,54L42,74Z" />
+</vector>
+''')
+
 write_file("app/src/main/res/values/strings.xml", r'''
 <resources>
     <string name="app_name">ClipPulse</string>
@@ -363,7 +378,7 @@ object ConfigPrefs {
 }
 ''')
 
-# 9. Universal AI Client (Fetch Models + 1-Token Connect + Failover)
+# 9. Universal AI Client
 write_file("app/src/main/java/com/clippulse/app/ai/UniversalAiClient.kt", r'''
 package com.clippulse.app.ai
 
@@ -596,7 +611,6 @@ class UniversalAiClient {
                     }
                 }
             } catch (_: Exception) {
-                // Rotate to next backup key
             }
         }
         return null
@@ -680,8 +694,7 @@ class ClipEngine(private val context: Context) {
 
     suspend fun updateYtDlpEngine(): Result<String> = withContext(Dispatchers.IO) {
         try {
-            val status = YoutubeDL.getInstance()
-                .updateYoutubeDL(context, YoutubeDL.UpdateChannel._STABLE)
+            val status = YoutubeDL.getInstance().updateYoutubeDL(context)
             Result.success("Engine status: ${status?.name ?: "UP_TO_DATE"}")
         } catch (e: Exception) {
             Result.failure(Exception(e.message ?: "Update failed"))
@@ -705,7 +718,7 @@ class ClipEngine(private val context: Context) {
                 val localFile = copyUriToCache(Uri.parse(input), workDir)
                     ?: return@withContext Result.failure(Exception("Could not read selected video file."))
                 val duration = probeDurationSeconds(localFile)
-                onStep("Scanning audio waveform peaks...")
+                onStep("Scanning highlight windows...")
                 val audioClips = detectLocalAudioPeaks(duration)
                 return@withContext Result.success(
                     VideoAnalysisResult(
@@ -776,7 +789,7 @@ class ClipEngine(private val context: Context) {
             val aiClips = if (useAi && transcriptLines.isNotEmpty() &&
                 (mode == DetectionMode.ALL || mode == DetectionMode.AI_VIRAL || mode == DetectionMode.KEYWORD)
             ) {
-                onStep("3/3 AI scoring viral hooks (Token-Saver ${if (aiConfig.peakOnlyTokenSaver) "ON" else "OFF"})...")
+                onStep("3/3 AI scoring viral hooks...")
                 val compactText = buildCompactTranscript(
                     transcriptLines,
                     if (aiConfig.peakOnlyTokenSaver) allRaw else emptyList()
@@ -910,7 +923,6 @@ class ClipEngine(private val context: Context) {
                         }
                     }
                 } catch (_: Exception) {
-                    // Skip malformed line safely
                 }
             }
         }
@@ -1153,7 +1165,6 @@ class ClipEngine(private val context: Context) {
                     actualFile.delete()
                 }
             } catch (_: Exception) {
-                // Continue exporting remaining clips
             }
         }
 
@@ -1471,7 +1482,6 @@ fun ClipPulseScreen(incomingSharedUrl: String?) {
                     Text("ClipPulse", fontWeight = FontWeight.Bold, fontSize = 20.sp, color = Color.White)
                 }
 
-                // Live AI Status Pill
                 Surface(
                     onClick = { showAiSheet = true },
                     shape = CircleShape,
@@ -1596,7 +1606,6 @@ fun ClipPulseScreen(incomingSharedUrl: String?) {
                 .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // URL Input Card
             item {
                 Surface(
                     color = SlateCard,
@@ -1632,7 +1641,6 @@ fun ClipPulseScreen(incomingSharedUrl: String?) {
                             }
                         )
 
-                        // Detection Mode Pills
                         Row(
                             modifier = Modifier.horizontalScroll(rememberScrollState()),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -1678,7 +1686,6 @@ fun ClipPulseScreen(incomingSharedUrl: String?) {
                 }
             }
 
-            // Smart Heatmap + Color-Coded Timeline
             val currentData = analysisResult
             if (currentData != null) {
                 item {
@@ -1731,7 +1738,6 @@ fun ClipPulseScreen(incomingSharedUrl: String?) {
                                 }
                             }
 
-                            // Visual Heatmap & Marker Canvas
                             Canvas(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1774,7 +1780,6 @@ fun ClipPulseScreen(incomingSharedUrl: String?) {
                                 }
                             }
 
-                            // Filter Chips
                             Row(
                                 modifier = Modifier.horizontalScroll(rememberScrollState()),
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1833,7 +1838,6 @@ fun ClipPulseScreen(incomingSharedUrl: String?) {
         }
     }
 
-    // Universal AI Fetch & Connect Modal Sheet
     if (showAiSheet) {
         ModalBottomSheet(
             onDismissRequest = { showAiSheet = false },
@@ -1929,7 +1933,6 @@ private fun ClipItemCard(
                     Spacer(Modifier.height(8.dp))
                 }
 
-                // Precision Trim Nudge Controls
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1980,7 +1983,6 @@ private fun AiConnectionSheet(
     ) {
         Text("Universal AI API Manager", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = Color.White)
 
-        // Provider Quick Presets
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             AssistChip(onClick = {
                 onUpdateConfig(config.copy(baseUrl = "https://api.deepseek.com/v1", isConnected = false))
@@ -2015,7 +2017,6 @@ private fun AiConnectionSheet(
             modifier = Modifier.fillMaxWidth()
         )
 
-        // Fetch Models + Model Dropdown + Connect
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedButton(
                 onClick = {
@@ -2110,7 +2111,6 @@ private fun AiConnectionSheet(
             Text(config.statusMessage, color = CrimsonHeatmap, fontSize = 12.sp)
         }
 
-        // Backup Failover Keys
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
                 value = backupKeyInput,
@@ -2129,7 +2129,6 @@ private fun AiConnectionSheet(
             }
         }
 
-        // Token Saver & Offline Mode Toggles
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Smart Peak-Only Mode (Saves ~85% Tokens)", fontSize = 13.sp, color = Color.White)
             Switch(checked = config.peakOnlyTokenSaver, onCheckedChange = { onUpdateConfig(config.copy(peakOnlyTokenSaver = it)) })
@@ -2139,7 +2138,6 @@ private fun AiConnectionSheet(
             Switch(checked = config.offlineMode, onCheckedChange = { onUpdateConfig(config.copy(offlineMode = it)) })
         }
 
-        // Future-proof Engine Updater
         OutlinedButton(
             onClick = {
                 scope.launch {
